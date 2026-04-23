@@ -20,7 +20,7 @@
         <key>StandardErrorPath</key>
         <string>/dev/null</string>
         <key>RunAtLoad</key>
-        <false/>
+        <true/>
         <key>EnvironmentVariables</key>
         <dict>
             <key>PATH</key>

@@ -37,6 +37,8 @@ struct Settings: Codable {
     var resolution: String       = "UHD"
     var logRetentionDays: Int    = 7
     var enableWatermark: Bool    = true
+    var watermarkSize: String    = "medium"   // small | medium | large | xl
+    var lastInstalledBuild: String = ""
 
     static func load() -> Settings {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: AppPaths.settingsFile)),
@@ -70,14 +72,15 @@ enum ScriptRunner {
         task.executableURL = URL(fileURLWithPath: "/bin/bash")
         task.arguments     = [AppPaths.scriptPath]
         task.environment   = [
-            "HOME":                        NSHomeDirectory(),
-            "PATH":                        "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-            "BINGWALLPAPER_LOG_DIR":       AppPaths.logsDir,
-            "BINGWALLPAPER_WALLPAPER_DIR": settings.wallpaperDir,
-            "BINGWALLPAPER_MARKET":        settings.market,
-            "BINGWALLPAPER_RESOLUTION":    settings.resolution,
-            "BINGWALLPAPER_WATERMARK":     settings.enableWatermark ? "1" : "0",
-            "BINGWALLPAPER_LOG_RETENTION": String(settings.logRetentionDays),
+            "HOME":                          NSHomeDirectory(),
+            "PATH":                          "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            "BINGWALLPAPER_LOG_DIR":         AppPaths.logsDir,
+            "BINGWALLPAPER_WALLPAPER_DIR":   settings.wallpaperDir,
+            "BINGWALLPAPER_MARKET":          settings.market,
+            "BINGWALLPAPER_RESOLUTION":      settings.resolution,
+            "BINGWALLPAPER_WATERMARK":       settings.enableWatermark ? "1" : "0",
+            "BINGWALLPAPER_WATERMARK_SIZE":  settings.watermarkSize,
+            "BINGWALLPAPER_LOG_RETENTION":   String(settings.logRetentionDays),
         ]
         do    { try task.run() } catch { exit(1) }
         task.waitUntilExit()
@@ -87,27 +90,27 @@ enum ScriptRunner {
 
 // MARK: - Settings Window
 
-class SettingsWindowController: NSWindowController, NSWindowDelegate {
+class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTextFieldDelegate {
 
     static var shared: SettingsWindowController?
 
     private var settings: Settings
     private weak var appDelegate: AppDelegate?
 
-    private var hourField:        NSTextField!
-    private var minuteField:      NSTextField!
-    private var marketPopup:      NSPopUpButton!
-    private var resolutionPopup:  NSPopUpButton!
-    private var retentionField:   NSTextField!
-    private var wallpaperDirField: NSTextField!
-    private var watermarkCheck:   NSButton!
-    private var statusLabel:      NSTextField!
+    private var hourField:          NSTextField!
+    private var minuteField:        NSTextField!
+    private var marketPopup:        NSPopUpButton!
+    private var resolutionPopup:    NSPopUpButton!
+    private var retentionField:     NSTextField!
+    private var wallpaperDirField:  NSTextField!
+    private var watermarkCheck:     NSButton!
+    private var watermarkSizePopup: NSPopUpButton!
 
     init(settings: Settings, delegate: AppDelegate) {
         self.settings    = settings
         self.appDelegate = delegate
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 390),
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 358),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -124,7 +127,7 @@ class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private func buildUI() {
         guard let cv = window?.contentView else { return }
 
-        var y: CGFloat        = 350
+        var y: CGFloat        = 318
         let labelW: CGFloat   = 160
         let fieldX: CGFloat   = 175
         let fieldW: CGFloat   = 260
@@ -153,9 +156,11 @@ class SettingsWindowController: NSWindowController, NSWindowDelegate {
         hourField = NSTextField(frame: NSRect(x: 0, y: 0, width: 50, height: 24))
         hourField.stringValue  = String(settings.scheduledHour)
         hourField.formatter    = intFormatter(0, 23)
+        hourField.delegate     = self
         minuteField = NSTextField(frame: NSRect(x: 70, y: 0, width: 50, height: 24))
         minuteField.stringValue = String(format: "%02d", settings.scheduledMinute)
         minuteField.formatter   = intFormatter(0, 59)
+        minuteField.delegate    = self
         let colon = NSTextField(labelWithString: ":")
         colon.frame = NSRect(x: 54, y: 2, width: 12, height: 20)
         let hint = NSTextField(labelWithString: "(HH : MM)")
@@ -174,6 +179,8 @@ class SettingsWindowController: NSWindowController, NSWindowDelegate {
         marketPopup = NSPopUpButton(frame: NSRect(x: fieldX, y: y, width: 200, height: 24))
         marketPopup.addItems(withTitles: markets)
         if let i = markets.firstIndex(of: settings.market) { marketPopup.selectItem(at: i) }
+        marketPopup.target = self
+        marketPopup.action = #selector(popupChanged)
         cv.addSubview(marketPopup)
         y -= rowH
 
@@ -182,15 +189,27 @@ class SettingsWindowController: NSWindowController, NSWindowDelegate {
         resolutionPopup = NSPopUpButton(frame: NSRect(x: fieldX, y: y, width: 200, height: 24))
         resolutionPopup.addItems(withTitles: resolutions)
         if let i = resolutions.firstIndex(of: settings.resolution) { resolutionPopup.selectItem(at: i) }
+        resolutionPopup.target = self
+        resolutionPopup.action = #selector(popupChanged)
         cv.addSubview(resolutionPopup)
         y -= rowH
 
         label("Watermark:", y: y)
         watermarkCheck = NSButton(checkboxWithTitle: "Stamp title & description on image",
-                                   target: nil, action: nil)
+                                   target: self, action: #selector(overlayChanged))
         watermarkCheck.frame = NSRect(x: fieldX, y: y, width: fieldW, height: 24)
         watermarkCheck.state = settings.enableWatermark ? .on : .off
         cv.addSubview(watermarkCheck)
+        y -= rowH
+
+        label("Overlay Size:", y: y)
+        let sizes = ["small", "medium", "large", "xl"]
+        watermarkSizePopup = NSPopUpButton(frame: NSRect(x: fieldX, y: y, width: 160, height: 24))
+        watermarkSizePopup.addItems(withTitles: sizes)
+        if let i = sizes.firstIndex(of: settings.watermarkSize) { watermarkSizePopup.selectItem(at: i) }
+        watermarkSizePopup.target = self
+        watermarkSizePopup.action = #selector(overlayChanged)
+        cv.addSubview(watermarkSizePopup)
         y -= rowH
 
         // ── Paths ───────────────────────────────────────
@@ -199,6 +218,7 @@ class SettingsWindowController: NSWindowController, NSWindowDelegate {
         label("Wallpaper Folder:", y: y)
         wallpaperDirField = NSTextField(frame: NSRect(x: fieldX, y: y, width: fieldW - 34, height: 24))
         wallpaperDirField.stringValue = settings.wallpaperDir
+        wallpaperDirField.delegate    = self
         cv.addSubview(wallpaperDirField)
         let browseBtn = NSButton(frame: NSRect(x: fieldX + fieldW - 30, y: y, width: 30, height: 24))
         browseBtn.title      = "…"
@@ -216,6 +236,7 @@ class SettingsWindowController: NSWindowController, NSWindowDelegate {
         retentionField = NSTextField(frame: NSRect(x: 0, y: 0, width: 50, height: 24))
         retentionField.stringValue = String(settings.logRetentionDays)
         retentionField.formatter   = intFormatter(1, 365)
+        retentionField.delegate    = self
         let daysLbl = NSTextField(labelWithString: "days")
         daysLbl.frame = NSRect(x: 56, y: 2, width: 50, height: 20)
         logStack.addSubview(retentionField)
@@ -227,30 +248,6 @@ class SettingsWindowController: NSWindowController, NSWindowDelegate {
         logsPathLbl.font      = .systemFont(ofSize: 10)
         logsPathLbl.textColor = .tertiaryLabelColor
         cv.addSubview(logsPathLbl)
-        y -= rowH + 18
-
-        // ── Buttons ─────────────────────────────────────
-        y -= 8
-        statusLabel = NSTextField(labelWithString: "")
-        statusLabel.frame     = NSRect(x: 20, y: y, width: 260, height: 20)
-        statusLabel.font      = .systemFont(ofSize: 11)
-        statusLabel.textColor = .secondaryLabelColor
-        cv.addSubview(statusLabel)
-
-        let cancelBtn = NSButton(frame: NSRect(x: 262, y: y - 2, width: 90, height: 28))
-        cancelBtn.title      = "Cancel"
-        cancelBtn.bezelStyle = .rounded
-        cancelBtn.target     = self
-        cancelBtn.action     = #selector(cancelAction)
-        cv.addSubview(cancelBtn)
-
-        let saveBtn = NSButton(frame: NSRect(x: 360, y: y - 2, width: 78, height: 28))
-        saveBtn.title          = "Save"
-        saveBtn.bezelStyle     = .rounded
-        saveBtn.keyEquivalent  = "\r"
-        saveBtn.target         = self
-        saveBtn.action         = #selector(saveAction)
-        cv.addSubview(saveBtn)
     }
 
     private func intFormatter(_ min: Int, _ max: Int) -> NumberFormatter {
@@ -261,6 +258,8 @@ class SettingsWindowController: NSWindowController, NSWindowDelegate {
         return f
     }
 
+    // MARK: Actions
+
     @objc private func browseWallpaperDir() {
         let panel = NSOpenPanel()
         panel.canChooseFiles        = false
@@ -269,24 +268,41 @@ class SettingsWindowController: NSWindowController, NSWindowDelegate {
         panel.prompt = "Choose"
         if panel.runModal() == .OK, let url = panel.url {
             wallpaperDirField.stringValue = url.path
+            commit()
         }
     }
 
-    @objc private func saveAction() {
+    /// Market / resolution popup changes — save and update schedule only.
+    @objc private func popupChanged() { commit() }
+
+    /// Watermark on/off or overlay size changes — save, update, and re-stamp wallpaper immediately.
+    @objc private func overlayChanged() {
+        commit()
+        appDelegate?.runNow()
+    }
+
+    // MARK: NSTextFieldDelegate — fires on Return or focus loss
+
+    func controlTextDidEndEditing(_ obj: Notification) { commit() }
+
+    // MARK: Helpers
+
+    private func collectValues() {
         settings.scheduledHour    = hourField.integerValue
         settings.scheduledMinute  = minuteField.integerValue
         settings.market           = marketPopup.selectedItem?.title ?? "en-US"
         settings.resolution       = resolutionPopup.selectedItem?.title ?? "UHD"
         settings.enableWatermark  = watermarkCheck.state == .on
+        settings.watermarkSize    = watermarkSizePopup.selectedItem?.title ?? "medium"
         settings.logRetentionDays = retentionField.integerValue
         settings.wallpaperDir     = wallpaperDirField.stringValue
-        settings.save()
-        appDelegate?.applySettings(settings)
-        statusLabel.stringValue = "Saved."
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in self?.window?.close() }
     }
 
-    @objc private func cancelAction() { window?.close() }
+    private func commit() {
+        collectValues()
+        settings.save()
+        appDelegate?.applySettings(settings)
+    }
 
     func windowWillClose(_ notification: Notification) { SettingsWindowController.shared = nil }
 }
@@ -391,8 +407,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         ensureDirectories()
-        installLaunchAgentIfNeeded()
         setupStatusItem()
+        DispatchQueue.global(qos: .utility).async { self.installOrUpdateLaunchAgent() }
     }
 
     // MARK: Status Item
@@ -522,16 +538,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if AboutWindowController.shared == nil {
             AboutWindowController.shared = AboutWindowController()
         }
-        AboutWindowController.shared?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
+        AboutWindowController.shared?.window?.makeKeyAndOrderFront(nil)
     }
 
     @objc func openSettings() {
         if SettingsWindowController.shared == nil {
             SettingsWindowController.shared = SettingsWindowController(settings: settings, delegate: self)
         }
-        SettingsWindowController.shared?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
+        SettingsWindowController.shared?.window?.makeKeyAndOrderFront(nil)
     }
 
     func applySettings(_ newSettings: Settings) {
@@ -554,11 +570,35 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         bash("launchctl list '\(launchAgentLabel)' 2>/dev/null").exitCode == 0
     }
 
-    /// Write (or rewrite) the LaunchAgent plist using the current bundle path and schedule.
-    private func installLaunchAgentIfNeeded() {
-        guard !FileManager.default.fileExists(atPath: AppPaths.launchAgentPlist) else { return }
+    /// Install the LaunchAgent on first launch, or rewrite it when the app moves or the build changes.
+    /// Runs on a background thread — never call from the main thread.
+    private func installOrUpdateLaunchAgent() {
+        let currentBuild = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
+        let currentExec  = Bundle.main.executablePath ?? ""
+        let plistExists  = FileManager.default.fileExists(atPath: AppPaths.launchAgentPlist)
+
+        let buildChanged = settings.lastInstalledBuild != currentBuild
+        let pathChanged  = plistInstalledExecPath() != currentExec
+
+        guard !plistExists || buildChanged || pathChanged else { return }
+
+        let wasLoaded = plistExists && launchAgentIsLoaded()
+        if wasLoaded { bash("launchctl unload '\(AppPaths.launchAgentPlist)'") }
         writeLaunchAgentPlist()
         bash("launchctl load '\(AppPaths.launchAgentPlist)'")
+
+        settings.lastInstalledBuild = currentBuild
+        settings.save()
+    }
+
+    /// Returns the ProgramArguments[0] path stored in the installed plist, or "" if unreadable.
+    private func plistInstalledExecPath() -> String {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: AppPaths.launchAgentPlist)),
+              let obj  = try? PropertyListSerialization.propertyList(from: data, format: nil),
+              let dict = obj as? [String: Any],
+              let args = dict["ProgramArguments"] as? [String],
+              let first = args.first else { return "" }
+        return first
     }
 
     private func rewriteLaunchAgentSchedule() {
@@ -594,7 +634,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             <key>StandardErrorPath</key>
             <string>/dev/null</string>
             <key>RunAtLoad</key>
-            <false/>
+            <true/>
         </dict>
         </plist>
         """
@@ -628,14 +668,16 @@ extension ScriptRunner {
         task.executableURL = URL(fileURLWithPath: "/bin/bash")
         task.arguments     = [AppPaths.scriptPath]
         task.environment   = [
-            "HOME":                        NSHomeDirectory(),
-            "PATH":                        "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-            "BINGWALLPAPER_LOG_DIR":       AppPaths.logsDir,
-            "BINGWALLPAPER_WALLPAPER_DIR": settings.wallpaperDir,
-            "BINGWALLPAPER_MARKET":        settings.market,
-            "BINGWALLPAPER_RESOLUTION":    settings.resolution,
-            "BINGWALLPAPER_WATERMARK":     settings.enableWatermark ? "1" : "0",
-            "BINGWALLPAPER_LOG_RETENTION": String(settings.logRetentionDays),
+            "HOME":                          NSHomeDirectory(),
+            "PATH":                          "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            "BINGWALLPAPER_LOG_DIR":         AppPaths.logsDir,
+            "BINGWALLPAPER_WALLPAPER_DIR":   settings.wallpaperDir,
+            "BINGWALLPAPER_MARKET":          settings.market,
+            "BINGWALLPAPER_RESOLUTION":      settings.resolution,
+            "BINGWALLPAPER_WATERMARK":       settings.enableWatermark ? "1" : "0",
+            "BINGWALLPAPER_WATERMARK_SIZE":  settings.watermarkSize,
+            "BINGWALLPAPER_LOG_RETENTION":   String(settings.logRetentionDays),
+            "BINGWALLPAPER_FORCE":           "1",   // always re-download on manual Run Now
         ]
         try? task.run()
         task.waitUntilExit()

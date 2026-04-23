@@ -17,16 +17,7 @@ LOG_DIR="${BINGWALLPAPER_LOG_DIR:-${HOME}/Library/Logs/BingWallpaper}"
 WALLPAPER_DIR="${BINGWALLPAPER_WALLPAPER_DIR:-${HOME}/Pictures/BingWallpaper}"
 LOG_RETENTION="${BINGWALLPAPER_LOG_RETENTION:-7}"
 WATERMARK="${BINGWALLPAPER_WATERMARK:-1}"
-
-# Create directories if missing
-mkdir -p "${LOG_DIR}"
-mkdir -p "${WALLPAPER_DIR}"
-TODAY=$(date +"%Y-%m-%d")
-WALLPAPER_FILE="${WALLPAPER_DIR}/bing-${TODAY}.jpg"
-
-# Generate timestamped log file
-TIMESTAMP=$(date +"%m-%d-%Y-%H%M%S")
-LOG_FILE="${LOG_DIR}/BingWallpaper_${TIMESTAMP}.log"
+WATERMARK_SIZE="${BINGWALLPAPER_WATERMARK_SIZE:-medium}"
 
 # Bing image API
 MARKET="${BINGWALLPAPER_MARKET:-en-US}"
@@ -34,12 +25,22 @@ RESOLUTION="${BINGWALLPAPER_RESOLUTION:-UHD}"
 BING_API="https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=1&mkt=${MARKET}"
 BING_BASE="https://www.bing.com"
 
+# Create directories if missing
+mkdir -p "${LOG_DIR}"
+mkdir -p "${WALLPAPER_DIR}"
+TODAY=$(date +"%Y-%m-%d")
+WALLPAPER_FILE="${WALLPAPER_DIR}/bing-${TODAY}.jpg"
+
+# Generate timestamped log file (always, so every run is visible in logs)
+TIMESTAMP=$(date +"%m-%d-%Y-%H%M%S")
+LOG_FILE="${LOG_DIR}/BingWallpaper_${TIMESTAMP}.log"
+
 # Log function
 log_message() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "${LOG_FILE}"
 }
 
-# Function to purge logs older than 7 days
+# Function to purge logs older than retention days
 purge_old_logs() {
     if [ -d "${LOG_DIR}" ]; then
         find "${LOG_DIR}" -name "BingWallpaper_*.log" -type f -mtime "+${LOG_RETENTION}" -delete
@@ -49,10 +50,27 @@ purge_old_logs() {
 # Purge old logs before starting
 purge_old_logs
 
-# Start
 log_message "=========================================="
 log_message "Starting Bing Daily Wallpaper Update"
 log_message "=========================================="
+
+# BINGWALLPAPER_FORCE=1 (set by Run Now) deletes today's file to force a fresh
+# download and re-stamp. Scheduled/RunAtLoad runs leave the file alone.
+if [ "${BINGWALLPAPER_FORCE:-0}" = "1" ] && [ -f "${WALLPAPER_FILE}" ]; then
+    log_message "Force flag set — removing cached image for fresh download."
+    rm -f "${WALLPAPER_FILE}"
+fi
+
+# If today's wallpaper already exists, just re-apply it and exit.
+# Avoids re-downloading on duplicate triggers (RunAtLoad, login, etc.).
+if [ -f "${WALLPAPER_FILE}" ]; then
+    log_message "Today's wallpaper already downloaded — re-applying."
+    osascript -e "tell application \"System Events\" to set picture of every desktop to \"${WALLPAPER_FILE}\"" 2>&1 | tee -a "${LOG_FILE}"
+    log_message "=========================================="
+    log_message "Bing Daily Wallpaper Update Completed"
+    log_message "=========================================="
+    exit 0
+fi
 
 # Fetch Bing API JSON
 log_message "Fetching Bing wallpaper metadata..."
@@ -108,7 +126,7 @@ log_message "Description: ${IMAGE_DESC}"
 # Stamp title + description as a subtle watermark on the lower-left (optional)
 if [ "${WATERMARK}" = "1" ]; then
     log_message "Adding watermark..."
-    /usr/bin/swift "${SCRIPT_DIR}/add-watermark.swift" "${WALLPAPER_FILE}" "${IMAGE_TITLE}" "${IMAGE_DESC}" 2>&1 | tee -a "${LOG_FILE}"
+    /usr/bin/swift "${SCRIPT_DIR}/add-watermark.swift" "${WALLPAPER_FILE}" "${IMAGE_TITLE}" "${IMAGE_DESC}" "${WATERMARK_SIZE}" 2>&1 | tee -a "${LOG_FILE}"
 fi
 
 # Set wallpaper on all desktops

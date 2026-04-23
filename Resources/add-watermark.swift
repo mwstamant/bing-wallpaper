@@ -4,13 +4,23 @@ import Foundation
 
 let args = CommandLine.arguments
 guard args.count >= 3 else {
-    fputs("Usage: add-watermark <image-path> <title> [description]\n", stderr)
+    fputs("Usage: add-watermark <image-path> <title> [description] [size]\n", stderr)
     exit(1)
 }
 
-let imagePath   = args[1]
-let title       = args[2]
+let imagePath  = args[1]
+let title      = args[2]
 let description = args.count >= 4 ? args[3] : nil
+let sizePreset  = args.count >= 5 ? args[4].lowercased() : "medium"
+
+// Size presets: scale factor relative to image height
+let sizeScale: CGFloat
+switch sizePreset {
+case "small": sizeScale = 0.010
+case "large": sizeScale = 0.018
+case "xl":    sizeScale = 0.024
+default:      sizeScale = 0.014 // medium
+}
 
 guard let image = NSImage(contentsOfFile: imagePath) else {
     fputs("Failed to load image: \(imagePath)\n", stderr)
@@ -37,7 +47,7 @@ guard let rep = NSBitmapImageRep(
 NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
 image.draw(in: NSRect(origin: .zero, size: size))
 
-let titleSize: CGFloat = max(size.height * 0.010, 11)
+let titleSize: CGFloat = max(size.height * sizeScale, 11)
 let descSize:  CGFloat = max(titleSize * 0.78, 9)
 let padding:   CGFloat = titleSize * 0.65
 let lineGap:   CGFloat = titleSize * 0.25
@@ -53,13 +63,21 @@ let cropX      = max((size.width - visibleW) / 2, 0)
 let marginX: CGFloat = cropX + titleSize * 0.7
 let marginY: CGFloat = titleSize * 0.7
 
+// Text shadow for contrast against any background image
+let shadow = NSShadow()
+shadow.shadowColor = NSColor.black.withAlphaComponent(0.85)
+shadow.shadowBlurRadius = 3
+shadow.shadowOffset = NSSize(width: 0, height: -1)
+
 let titleAttrs: [NSAttributedString.Key: Any] = [
-    .font:            NSFont.systemFont(ofSize: titleSize, weight: .medium),
-    .foregroundColor: NSColor.white.withAlphaComponent(0.90)
+    .font:            NSFont.systemFont(ofSize: titleSize, weight: .semibold),
+    .foregroundColor: NSColor.white,
+    .shadow:          shadow
 ]
 let descAttrs: [NSAttributedString.Key: Any] = [
     .font:            NSFont.systemFont(ofSize: descSize, weight: .regular),
-    .foregroundColor: NSColor.white.withAlphaComponent(0.68)
+    .foregroundColor: NSColor.white.withAlphaComponent(0.90),
+    .shadow:          shadow
 ]
 
 let titleStr = NSAttributedString(string: title, attributes: titleAttrs)
@@ -79,9 +97,9 @@ let bgRect = NSRect(
     height: contentHeight + padding * 1.4
 )
 
-// Subtle pill background
+// Pill background — increased opacity for legibility on bright images
 let pill = NSBezierPath(roundedRect: bgRect, xRadius: bgRect.height / 3, yRadius: bgRect.height / 3)
-NSColor.black.withAlphaComponent(0.28).setFill()
+NSColor.black.withAlphaComponent(0.55).setFill()
 pill.fill()
 
 // Draw title at top, description below
