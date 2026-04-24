@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ServiceManagement
 
 // MARK: - App Paths (no hardcoded home dir)
 
@@ -97,6 +98,7 @@ class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTextFiel
     private var settings: Settings
     private weak var appDelegate: AppDelegate?
 
+    private var runAtLoginCheck:     NSButton!
     private var hourField:          NSTextField!
     private var minuteField:        NSTextField!
     private var marketPopup:        NSPopUpButton!
@@ -110,7 +112,7 @@ class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTextFiel
         self.settings    = settings
         self.appDelegate = delegate
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 358),
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 414),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -127,7 +129,7 @@ class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTextFiel
     private func buildUI() {
         guard let cv = window?.contentView else { return }
 
-        var y: CGFloat        = 318
+        var y: CGFloat        = 374
         let labelW: CGFloat   = 160
         let fieldX: CGFloat   = 175
         let fieldW: CGFloat   = 260
@@ -147,6 +149,17 @@ class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTextFiel
             l.textColor = .secondaryLabelColor
             cv.addSubview(l)
         }
+
+        // ── Startup ─────────────────────────────────────
+        section("STARTUP", y: y); y -= rowH
+
+        label("Open at Login:", y: y)
+        runAtLoginCheck = NSButton(checkboxWithTitle: "Launch menu bar app at login",
+                                   target: self, action: #selector(runAtLoginChanged))
+        runAtLoginCheck.frame = NSRect(x: fieldX, y: y, width: fieldW, height: 24)
+        runAtLoginCheck.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        cv.addSubview(runAtLoginCheck)
+        y -= rowH
 
         // ── Schedule ────────────────────────────────────
         section("SCHEDULE", y: y); y -= rowH
@@ -259,6 +272,11 @@ class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTextFiel
     }
 
     // MARK: Actions
+
+    @objc private func runAtLoginChanged() {
+        appDelegate?.setRunAtLogin(runAtLoginCheck.state == .on)
+        runAtLoginCheck.state = SMAppService.mainApp.status == .enabled ? .on : .off
+    }
 
     @objc private func browseWallpaperDir() {
         let panel = NSOpenPanel()
@@ -580,6 +598,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         settings = newSettings
         rewriteLaunchAgentSchedule()
         rebuildMenu()
+    }
+
+    func setRunAtLogin(_ enable: Bool) {
+        do {
+            if enable {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+        } catch {
+            // Checkbox corrects itself by re-reading SMAppService.mainApp.status
+        }
     }
 
     // MARK: Directories
