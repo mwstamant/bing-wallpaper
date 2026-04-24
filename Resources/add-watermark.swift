@@ -16,10 +16,10 @@ let sizePreset  = args.count >= 5 ? args[4].lowercased() : "medium"
 // Size presets: scale factor relative to image height
 let sizeScale: CGFloat
 switch sizePreset {
-case "small": sizeScale = 0.010
-case "large": sizeScale = 0.018
-case "xl":    sizeScale = 0.024
-default:      sizeScale = 0.014 // medium
+case       "small": sizeScale = 0.010
+case       "large": sizeScale = 0.018
+case "extra-large": sizeScale = 0.024
+default: sizeScale = 0.014 // medium
 }
 
 guard let image = NSImage(contentsOfFile: imagePath) else {

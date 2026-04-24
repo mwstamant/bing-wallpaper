@@ -37,7 +37,7 @@ struct Settings: Codable {
     var resolution: String       = "UHD"
     var logRetentionDays: Int    = 7
     var enableWatermark: Bool    = true
-    var watermarkSize: String    = "medium"   // small | medium | large | xl
+    var watermarkSize: String    = "medium"   // small | medium | large | extra-large
     var lastInstalledBuild: String = ""
 
     static func load() -> Settings {
@@ -203,7 +203,7 @@ class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTextFiel
         y -= rowH
 
         label("Overlay Size:", y: y)
-        let sizes = ["small", "medium", "large", "xl"]
+        let sizes = ["small", "medium", "large", "extra-large"]
         watermarkSizePopup = NSPopUpButton(frame: NSRect(x: fieldX, y: y, width: 160, height: 24))
         watermarkSizePopup.addItems(withTitles: sizes)
         if let i = sizes.firstIndex(of: settings.watermarkSize) { watermarkSizePopup.selectItem(at: i) }
@@ -409,6 +409,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ensureDirectories()
         setupStatusItem()
         DispatchQueue.global(qos: .utility).async { self.installOrUpdateLaunchAgent() }
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(systemDidWake),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
     }
 
     // MARK: Status Item
@@ -492,7 +498,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setIcon(running: true)
         rebuildMenu()
         DispatchQueue.global(qos: .userInitiated).async {
-            ScriptRunner.runInProcess(settings: self.settings)
+            ScriptRunner.runInProcess(settings: self.settings, force: true)
+            DispatchQueue.main.async {
+                self.isRunning = false
+                self.setIcon(running: false)
+                self.rebuildMenu()
+            }
+        }
+    }
+
+    @objc private func systemDidWake() {
+        guard !isRunning else { return }
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd"
+        let today = df.string(from: Date())
+        let wallpaperFile = (settings.wallpaperDir as NSString).appendingPathComponent("bing-\(today).jpg")
+        guard !FileManager.default.fileExists(atPath: wallpaperFile) else { return }
+        isRunning = true
+        setIcon(running: true)
+        rebuildMenu()
+        DispatchQueue.global(qos: .utility).async {
+            ScriptRunner.runInProcess(settings: self.settings, force: false)
             DispatchQueue.main.async {
                 self.isRunning = false
                 self.setIcon(running: false)
@@ -663,7 +689,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 // MARK: - ScriptRunner (in-process variant for Run Now)
 
 extension ScriptRunner {
-    static func runInProcess(settings: Settings) {
+    static func runInProcess(settings: Settings, force: Bool = true) {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/bash")
         task.arguments     = [AppPaths.scriptPath]
@@ -677,7 +703,7 @@ extension ScriptRunner {
             "BINGWALLPAPER_WATERMARK":       settings.enableWatermark ? "1" : "0",
             "BINGWALLPAPER_WATERMARK_SIZE":  settings.watermarkSize,
             "BINGWALLPAPER_LOG_RETENTION":   String(settings.logRetentionDays),
-            "BINGWALLPAPER_FORCE":           "1",   // always re-download on manual Run Now
+            "BINGWALLPAPER_FORCE":           force ? "1" : "0",
         ]
         try? task.run()
         task.waitUntilExit()
