@@ -417,6 +417,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var isRunning = false
     private var settings  = Settings.load()
+    private var screenChangeWorkItem: DispatchWorkItem?
 
     private let launchAgentLabel = "com.nnet.bing-wallpaper"
 
@@ -431,6 +432,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self,
             selector: #selector(systemDidWake),
             name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(screenParametersDidChange),
+            name: NSApplication.didChangeScreenParametersNotification,
             object: nil
         )
     }
@@ -532,6 +539,40 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let today = df.string(from: Date())
         let wallpaperFile = (settings.wallpaperDir as NSString).appendingPathComponent("bing-\(today).jpg")
         guard !FileManager.default.fileExists(atPath: wallpaperFile) else { return }
+        isRunning = true
+        setIcon(running: true)
+        rebuildMenu()
+        DispatchQueue.global(qos: .utility).async {
+            ScriptRunner.runInProcess(settings: self.settings, force: false)
+            DispatchQueue.main.async {
+                self.isRunning = false
+                self.setIcon(running: false)
+                self.rebuildMenu()
+            }
+        }
+    }
+
+    // Fires when a display is connected/disconnected or its arrangement/resolution
+    // changes. Newly connected displays don't inherit the desktop picture that was
+    // already set on the others, so re-apply today's wallpaper to every screen.
+    // Screen reconfiguration can post this notification several times in quick
+    // succession, so debounce before reapplying.
+    @objc private func screenParametersDidChange() {
+        screenChangeWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.reapplyWallpaperForCurrentScreens()
+        }
+        screenChangeWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: workItem)
+    }
+
+    private func reapplyWallpaperForCurrentScreens() {
+        guard !isRunning else { return }
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd"
+        let today = df.string(from: Date())
+        let wallpaperFile = (settings.wallpaperDir as NSString).appendingPathComponent("bing-\(today).jpg")
+        guard FileManager.default.fileExists(atPath: wallpaperFile) else { return }
         isRunning = true
         setIcon(running: true)
         rebuildMenu()
