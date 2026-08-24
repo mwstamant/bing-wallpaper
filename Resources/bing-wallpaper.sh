@@ -111,8 +111,11 @@ fi
 FILE_SIZE=$(du -h "${WALLPAPER_FILE}" | cut -f1)
 log_message "Wallpaper downloaded: ${WALLPAPER_FILE} (${FILE_SIZE})"
 
-# Remove all previous wallpaper files, keeping only today's
-find "${WALLPAPER_DIR}" -name "bing-*.jpg" -type f ! -name "bing-${TODAY}.jpg" -delete
+# Remove old wallpaper files, keeping only the 3 most recent (today + 2 previous).
+# Filenames are date-stamped (bing-YYYY-MM-DD.jpg), so a reverse name sort is a
+# reverse chronological sort.
+find "${WALLPAPER_DIR}" -maxdepth 1 -name "bing-*.jpg" -type f | sort -r | tail -n +4 | \
+    while IFS= read -r old_file; do rm -f "${old_file}"; done
 
 # Extract title and description
 IMAGE_TITLE=$(echo "${API_RESPONSE}" | /usr/bin/python3 -c \

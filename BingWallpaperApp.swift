@@ -40,6 +40,7 @@ struct Settings: Codable {
     var enableWatermark: Bool    = true
     var watermarkSize: String    = "medium"   // small | medium | large | extra-large
     var lastInstalledBuild: String = ""
+    var selectedWallpaperFile: String = ""    // filename (not path) of a manually chosen wallpaper; "" = follow today's
 
     static func load() -> Settings {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: AppPaths.settingsFile)),
@@ -475,6 +476,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(mi("View Latest Log",        sel: #selector(viewLatestLog)))
         menu.addItem(.separator())
 
+        let switchItem = NSMenuItem(title: "Switch Wallpaper", action: nil, keyEquivalent: "")
+        switchItem.submenu = buildWallpaperSubmenu()
+        menu.addItem(switchItem)
+        menu.addItem(.separator())
+
         let loaded       = launchAgentIsLoaded()
         let scheduleItem = mi(loaded ? "Disable Daily Schedule" : "Enable Daily Schedule",
                                sel: #selector(toggleSchedule))
@@ -515,6 +521,82 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return "\(ok ? "✓" : "✗") Last run: \(df.string(from: date))"
     }
 
+    // MARK: Wallpaper Switching
+
+    private static let wallpaperDateFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd"
+        return df
+    }()
+
+    /// Wallpaper files present on disk (newest first). The script keeps at most 3.
+    private func availableWallpapers() -> [(fileName: String, path: String, date: Date)] {
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(atPath: settings.wallpaperDir) else { return [] }
+        return files
+            .filter { $0.hasPrefix("bing-") && $0.hasSuffix(".jpg") }
+            .compactMap { name -> (String, String, Date)? in
+                let dateString = name.dropFirst("bing-".count).dropLast(".jpg".count)
+                guard let date = Self.wallpaperDateFormatter.date(from: String(dateString)) else { return nil }
+                let path = (settings.wallpaperDir as NSString).appendingPathComponent(name)
+                return (name, path, date)
+            }
+            .sorted { $0.2 > $1.2 }
+    }
+
+    private func buildWallpaperSubmenu() -> NSMenu {
+        let submenu = NSMenu()
+        let wallpapers = availableWallpapers()
+        if wallpapers.isEmpty {
+            let item = NSMenuItem(title: "No wallpapers yet", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            submenu.addItem(item)
+            return submenu
+        }
+
+        let today = Self.wallpaperDateFormatter.string(from: Date())
+        let activeFileName = settings.selectedWallpaperFile.isEmpty
+            ? "bing-\(today).jpg"
+            : settings.selectedWallpaperFile
+
+        let df = DateFormatter()
+        df.dateFormat = "EEE, MMM d"
+        let calendar = Calendar.current
+
+        for wallpaper in wallpapers {
+            let title: String
+            if calendar.isDateInToday(wallpaper.date) {
+                title = "Today — \(df.string(from: wallpaper.date))"
+            } else if calendar.isDateInYesterday(wallpaper.date) {
+                title = "Yesterday — \(df.string(from: wallpaper.date))"
+            } else {
+                title = df.string(from: wallpaper.date)
+            }
+            let item = NSMenuItem(title: title, action: #selector(switchWallpaper(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = wallpaper.fileName
+            item.state = wallpaper.fileName == activeFileName ? .on : .off
+            submenu.addItem(item)
+        }
+        return submenu
+    }
+
+    @objc private func switchWallpaper(_ sender: NSMenuItem) {
+        guard let fileName = sender.representedObject as? String else { return }
+        let path = (settings.wallpaperDir as NSString).appendingPathComponent(fileName)
+        guard FileManager.default.fileExists(atPath: path) else { return }
+        applyWallpaperFile(path)
+        settings.selectedWallpaperFile = fileName
+        settings.save()
+        rebuildMenu()
+    }
+
+    /// Re-applies an already-downloaded wallpaper file to every desktop without re-running the download script.
+    @discardableResult
+    private func applyWallpaperFile(_ path: String) -> Bool {
+        bash("osascript -e 'tell application \"System Events\" to set picture of every desktop to \"\(path)\"'").exitCode == 0
+    }
+
     // MARK: Actions
 
     @objc func runNow() {
@@ -527,6 +609,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async {
                 self.isRunning = false
                 self.setIcon(running: false)
+                self.settings.selectedWallpaperFile = ""
+                self.settings.save()
                 self.rebuildMenu()
             }
         }
@@ -547,6 +631,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async {
                 self.isRunning = false
                 self.setIcon(running: false)
+                self.settings.selectedWallpaperFile = ""
+                self.settings.save()
                 self.rebuildMenu()
             }
         }
@@ -571,18 +657,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let df = DateFormatter()
         df.dateFormat = "yyyy-MM-dd"
         let today = df.string(from: Date())
-        let wallpaperFile = (settings.wallpaperDir as NSString).appendingPathComponent("bing-\(today).jpg")
+        let activeFileName = settings.selectedWallpaperFile.isEmpty
+            ? "bing-\(today).jpg"
+            : settings.selectedWallpaperFile
+        let wallpaperFile = (settings.wallpaperDir as NSString).appendingPathComponent(activeFileName)
         guard FileManager.default.fileExists(atPath: wallpaperFile) else { return }
-        isRunning = true
-        setIcon(running: true)
-        rebuildMenu()
         DispatchQueue.global(qos: .utility).async {
-            ScriptRunner.runInProcess(settings: self.settings, force: false)
-            DispatchQueue.main.async {
-                self.isRunning = false
-                self.setIcon(running: false)
-                self.rebuildMenu()
-            }
+            self.applyWallpaperFile(wallpaperFile)
         }
     }
 
