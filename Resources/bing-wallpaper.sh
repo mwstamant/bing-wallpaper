@@ -30,6 +30,7 @@ mkdir -p "${LOG_DIR}"
 mkdir -p "${WALLPAPER_DIR}"
 TODAY=$(date +"%Y-%m-%d")
 WALLPAPER_FILE="${WALLPAPER_DIR}/bing-${TODAY}.jpg"
+METADATA_FILE="${WALLPAPER_DIR}/bing-${TODAY}.json"
 
 # Generate timestamped log file (always, so every run is visible in logs)
 TIMESTAMP=$(date +"%m-%d-%Y-%H%M%S")
@@ -58,13 +59,45 @@ log_message "=========================================="
 # download and re-stamp. Scheduled/RunAtLoad runs leave the file alone.
 if [ "${BINGWALLPAPER_FORCE:-0}" = "1" ] && [ -f "${WALLPAPER_FILE}" ]; then
     log_message "Force flag set — removing cached image for fresh download."
-    rm -f "${WALLPAPER_FILE}"
+    rm -f "${WALLPAPER_FILE}" "${METADATA_FILE}"
 fi
 
 # If today's wallpaper already exists, just re-apply it and exit.
 # Avoids re-downloading on duplicate triggers (RunAtLoad, login, etc.).
 if [ -f "${WALLPAPER_FILE}" ]; then
     log_message "Today's wallpaper already downloaded — re-applying."
+
+    # Backfill metadata for existing cached image if missing.
+    if [ ! -f "${METADATA_FILE}" ]; then
+        log_message "Metadata missing for today's cached wallpaper — fetching details."
+        API_RESPONSE=$(curl -s --max-time 15 "${BING_API}" 2>/dev/null)
+        if [ -n "${API_RESPONSE}" ]; then
+            IMAGE_TITLE=$(echo "${API_RESPONSE}" | /usr/bin/python3 -c \
+                "import sys, json; data=json.load(sys.stdin); print(data['images'][0].get('title','Bing Daily Wallpaper'))" 2>/dev/null)
+            IMAGE_TITLE="${IMAGE_TITLE:-Bing Daily Wallpaper}"
+            IMAGE_DESC=$(echo "${API_RESPONSE}" | /usr/bin/python3 -c \
+                "import sys, json; data=json.load(sys.stdin); print(data['images'][0].get('copyright',''))" 2>/dev/null)
+
+            BWP_METADATA_FILE="${METADATA_FILE}" \
+            BWP_TITLE="${IMAGE_TITLE}" \
+            BWP_DESC="${IMAGE_DESC}" \
+            BWP_DATE="${TODAY}" \
+            /usr/bin/python3 - <<'PY'
+import json
+import os
+
+payload = {
+    "title": os.environ.get("BWP_TITLE", "Bing Daily Wallpaper"),
+    "description": os.environ.get("BWP_DESC", ""),
+    "date": os.environ.get("BWP_DATE", ""),
+}
+
+with open(os.environ["BWP_METADATA_FILE"], "w", encoding="utf-8") as f:
+    json.dump(payload, f, ensure_ascii=False, indent=2)
+PY
+        fi
+    fi
+
     osascript -e "tell application \"System Events\" to set picture of every desktop to \"${WALLPAPER_FILE}\"" 2>&1 | tee -a "${LOG_FILE}"
     log_message "=========================================="
     log_message "Bing Daily Wallpaper Update Completed"
@@ -115,7 +148,10 @@ log_message "Wallpaper downloaded: ${WALLPAPER_FILE} (${FILE_SIZE})"
 # Filenames are date-stamped (bing-YYYY-MM-DD.jpg), so a reverse name sort is a
 # reverse chronological sort.
 find "${WALLPAPER_DIR}" -maxdepth 1 -name "bing-*.jpg" -type f | sort -r | tail -n +4 | \
-    while IFS= read -r old_file; do rm -f "${old_file}"; done
+    while IFS= read -r old_file; do
+        rm -f "${old_file}"
+        rm -f "${old_file%.jpg}.json"
+    done
 
 # Extract title and description
 IMAGE_TITLE=$(echo "${API_RESPONSE}" | /usr/bin/python3 -c \
@@ -125,6 +161,25 @@ IMAGE_DESC=$(echo "${API_RESPONSE}" | /usr/bin/python3 -c \
     "import sys, json; data=json.load(sys.stdin); print(data['images'][0].get('copyright',''))" 2>/dev/null)
 log_message "Title: ${IMAGE_TITLE}"
 log_message "Description: ${IMAGE_DESC}"
+
+# Persist title/description metadata for the desktop switcher UI
+BWP_METADATA_FILE="${METADATA_FILE}" \
+BWP_TITLE="${IMAGE_TITLE}" \
+BWP_DESC="${IMAGE_DESC}" \
+BWP_DATE="${TODAY}" \
+/usr/bin/python3 - <<'PY'
+import json
+import os
+
+payload = {
+    "title": os.environ.get("BWP_TITLE", "Bing Daily Wallpaper"),
+    "description": os.environ.get("BWP_DESC", ""),
+    "date": os.environ.get("BWP_DATE", ""),
+}
+
+with open(os.environ["BWP_METADATA_FILE"], "w", encoding="utf-8") as f:
+    json.dump(payload, f, ensure_ascii=False, indent=2)
+PY
 
 # Stamp title + description as a subtle watermark on the lower-left (optional)
 if [ "${WATERMARK}" = "1" ]; then
