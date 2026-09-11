@@ -785,6 +785,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSApplication.didChangeScreenParametersNotification,
             object: nil
         )
+        // Fires when a display wakes from sleep independent of the whole Mac
+        // sleeping — e.g. an external monitor that powered off (DPMS) while the
+        // Mac stayed awake behind the lock screen, then powers back on at login.
+        // didWakeNotification doesn't cover this case, so without this observer
+        // that display never gets today's wallpaper reapplied.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(screensDidWake),
+            name: NSWorkspace.screensDidWakeNotification,
+            object: nil
+        )
     }
 
     // MARK: Status Item
@@ -1053,12 +1064,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // Screen reconfiguration can post this notification several times in quick
     // succession, so debounce before reapplying.
     @objc private func screenParametersDidChange() {
+        scheduleReapplyForCurrentScreens(afterDelay: 1.5)
+    }
+
+    // A display waking from sleep needs a moment before System Events
+    // recognizes it as having an active desktop, so debounce/delay here too.
+    @objc private func screensDidWake() {
+        scheduleReapplyForCurrentScreens(afterDelay: 1.5)
+    }
+
+    private func scheduleReapplyForCurrentScreens(afterDelay delay: TimeInterval) {
         screenChangeWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
             self?.reapplyWallpaperForCurrentScreens()
         }
         screenChangeWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
     private func reapplyWallpaperForCurrentScreens() {
