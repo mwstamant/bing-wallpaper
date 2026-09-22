@@ -25,6 +25,13 @@ RESOLUTION="${BINGWALLPAPER_RESOLUTION:-UHD}"
 BING_API="https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=1&mkt=${MARKET}"
 BING_BASE="https://www.bing.com"
 
+# This script's only automatic trigger is a scheduled wake (StartCalendarInterval),
+# which can fire a few seconds before the Mac's network is back up after sleep —
+# a single curl attempt can lose that race. Retry network calls a few times
+# with a short delay before giving up.
+RETRY_ATTEMPTS="${BINGWALLPAPER_RETRY_ATTEMPTS:-4}"
+RETRY_DELAY="${BINGWALLPAPER_RETRY_DELAY:-5}"
+
 # Create directories if missing
 mkdir -p "${LOG_DIR}"
 mkdir -p "${WALLPAPER_DIR}"
@@ -39,6 +46,23 @@ LOG_FILE="${LOG_DIR}/BingWallpaper_${TIMESTAMP}.log"
 # Log function
 log_message() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "${LOG_FILE}"
+}
+
+# Fetch the Bing metadata API, retrying on empty/failed responses.
+fetch_bing_metadata() {
+    local attempt response
+    for attempt in $(seq 1 "${RETRY_ATTEMPTS}"); do
+        response=$(curl -s --max-time 15 "${BING_API}" 2>/dev/null)
+        if [ -n "${response}" ]; then
+            printf '%s' "${response}"
+            return 0
+        fi
+        if [ "${attempt}" -lt "${RETRY_ATTEMPTS}" ]; then
+            log_message "Bing API fetch attempt ${attempt} failed — retrying in ${RETRY_DELAY}s..."
+            sleep "${RETRY_DELAY}"
+        fi
+    done
+    return 1
 }
 
 # Function to purge logs older than retention days
@@ -70,7 +94,7 @@ if [ -f "${WALLPAPER_FILE}" ]; then
     # Backfill metadata for existing cached image if missing.
     if [ ! -f "${METADATA_FILE}" ]; then
         log_message "Metadata missing for today's cached wallpaper — fetching details."
-        API_RESPONSE=$(curl -s --max-time 15 "${BING_API}" 2>/dev/null)
+        API_RESPONSE=$(fetch_bing_metadata)
         if [ -n "${API_RESPONSE}" ]; then
             IMAGE_TITLE=$(echo "${API_RESPONSE}" | /usr/bin/python3 -c \
                 "import sys, json; data=json.load(sys.stdin); print(data['images'][0].get('title','Bing Daily Wallpaper'))" 2>/dev/null)
@@ -107,10 +131,10 @@ fi
 
 # Fetch Bing API JSON
 log_message "Fetching Bing wallpaper metadata..."
-API_RESPONSE=$(curl -s --max-time 15 "${BING_API}" 2>/dev/null)
+API_RESPONSE=$(fetch_bing_metadata)
 
 if [ -z "${API_RESPONSE}" ]; then
-    log_message "ERROR: Failed to fetch Bing API response"
+    log_message "ERROR: Failed to fetch Bing API response after ${RETRY_ATTEMPTS} attempts"
     log_message "=========================================="
     exit 1
 fi
@@ -131,12 +155,21 @@ IMAGE_URL=$(echo "${IMAGE_URL}" | sed "s/[0-9]\{3,4\}x[0-9]\{3,4\}/${RESOLUTION}
 
 log_message "Image URL: ${IMAGE_URL}"
 
-# Download the wallpaper
+# Download the wallpaper, retrying on failed/non-200 responses.
 log_message "Downloading wallpaper..."
-HTTP_CODE=$(curl -s --max-time 30 -w "%{http_code}" -o "${WALLPAPER_FILE}" "${IMAGE_URL}" 2>/dev/null)
+for attempt in $(seq 1 "${RETRY_ATTEMPTS}"); do
+    HTTP_CODE=$(curl -s --max-time 30 -w "%{http_code}" -o "${WALLPAPER_FILE}" "${IMAGE_URL}" 2>/dev/null)
+    if [ "${HTTP_CODE}" = "200" ] && [ -f "${WALLPAPER_FILE}" ]; then
+        break
+    fi
+    if [ "${attempt}" -lt "${RETRY_ATTEMPTS}" ]; then
+        log_message "Wallpaper download attempt ${attempt} failed (HTTP ${HTTP_CODE}) — retrying in ${RETRY_DELAY}s..."
+        sleep "${RETRY_DELAY}"
+    fi
+done
 
 if [ "${HTTP_CODE}" != "200" ] || [ ! -f "${WALLPAPER_FILE}" ]; then
-    log_message "ERROR: Failed to download wallpaper (HTTP ${HTTP_CODE})"
+    log_message "ERROR: Failed to download wallpaper (HTTP ${HTTP_CODE}) after ${RETRY_ATTEMPTS} attempts"
     log_message "=========================================="
     exit 1
 fi
