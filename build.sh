@@ -34,8 +34,14 @@ cp "${SCRIPT_DIR}/Resources/com.nnet.bing-wallpaper.plist"  "${CONTENTS}/Resourc
 echo "==> Ad-hoc signing..."
 codesign --force --sign - --deep "${APP_BUNDLE}"
 
+echo "==> Zipping app..."
+VERSION="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "${SCRIPT_DIR}/Info.plist")"
+ZIP_PATH="${BUILD_DIR}/${APP_NAME}_v${VERSION}.zip"
+ditto -c -k --sequesterRsrc --keepParent "${APP_BUNDLE}" "${ZIP_PATH}"
+
 echo ""
 echo "✓ Built: ${APP_BUNDLE}"
+echo "✓ Zipped: ${ZIP_PATH}"
 echo ""
 echo "Next steps:"
 echo "  1. Move to Applications:  mv '${APP_BUNDLE}' /Applications/"
