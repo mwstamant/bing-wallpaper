@@ -48,12 +48,16 @@ log_message() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "${LOG_FILE}"
 }
 
-# Fetch the Bing metadata API, retrying on empty/failed responses.
+# Fetch the Bing metadata API, retrying on empty, failed, or malformed responses.
+# A brief DarkWake (maintenance wake) can hand curl a connection that dies
+# mid-transfer — that yields a non-empty but truncated/invalid body, so a
+# plain emptiness check isn't enough; validate the JSON shape too.
 fetch_bing_metadata() {
     local attempt response
     for attempt in $(seq 1 "${RETRY_ATTEMPTS}"); do
         response=$(curl -s --max-time 15 "${BING_API}" 2>/dev/null)
-        if [ -n "${response}" ]; then
+        if [ -n "${response}" ] && echo "${response}" | /usr/bin/python3 -c \
+            "import sys, json; d = json.load(sys.stdin); assert d['images'][0]['url']" >/dev/null 2>&1; then
             printf '%s' "${response}"
             return 0
         fi
