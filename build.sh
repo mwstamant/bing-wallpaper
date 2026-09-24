@@ -58,6 +58,9 @@ ZIP_PATH="${BUILD_DIR}/${APP_NAME}_v${VERSION}.zip"
 ditto -c -k --sequesterRsrc --keepParent "${APP_BUNDLE}" "${ZIP_PATH}"
 
 if [ "${RELEASE}" -eq 1 ]; then
+    echo "==> Pushing commits to origin..."
+    git -C "${SCRIPT_DIR}" push
+
     echo "==> Creating GitHub release ${VERSION}..."
     PREV_TAG="$(git -C "${SCRIPT_DIR}" describe --tags --abbrev=0 2>/dev/null || true)"
     if [ -n "${PREV_TAG}" ]; then
