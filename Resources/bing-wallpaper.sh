@@ -25,12 +25,15 @@ RESOLUTION="${BINGWALLPAPER_RESOLUTION:-UHD}"
 BING_API="https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=1&mkt=${MARKET}"
 BING_BASE="https://www.bing.com"
 
-# This script's only automatic trigger is a scheduled wake (StartCalendarInterval),
-# which can fire a few seconds before the Mac's network is back up after sleep —
-# a single curl attempt can lose that race. Retry network calls a few times
-# with a short delay before giving up.
-RETRY_ATTEMPTS="${BINGWALLPAPER_RETRY_ATTEMPTS:-4}"
-RETRY_DELAY="${BINGWALLPAPER_RETRY_DELAY:-5}"
+# This script's automatic triggers (StartCalendarInterval, or the app's wake
+# handler) fire within ~1s of the Mac waking, but Wi-Fi/DHCP/DNS routinely
+# take 30-90s+ to come back after a real sleep (observed via pmset/system log:
+# a wake at 08:22:29 had no real network client activity until 08:24:08, ~99s
+# later). A DarkWake maintenance window can last up to ~180s, so a short retry
+# budget just gives up while the DarkWake window — and the network — is still
+# coming up. Retry generously before failing.
+RETRY_ATTEMPTS="${BINGWALLPAPER_RETRY_ATTEMPTS:-10}"
+RETRY_DELAY="${BINGWALLPAPER_RETRY_DELAY:-12}"
 
 # Create directories if missing
 mkdir -p "${LOG_DIR}"
