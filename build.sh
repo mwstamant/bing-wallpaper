@@ -21,6 +21,11 @@ if [ "${RELEASE}" -eq 1 ]; then
     echo "==> Checking release prerequisites..."
     command -v gh >/dev/null 2>&1 || { echo "ERROR: --release requires the GitHub CLI (gh)." >&2; exit 1; }
     gh auth status >/dev/null 2>&1 || { echo "ERROR: gh is not authenticated. Run 'gh auth login'." >&2; exit 1; }
+    if [ -n "$(git -C "${SCRIPT_DIR}" status --porcelain)" ]; then
+        echo "ERROR: Uncommitted changes. Commit them first so they appear in the release notes." >&2
+        git -C "${SCRIPT_DIR}" status --short >&2
+        exit 1
+    fi
     if (cd "${SCRIPT_DIR}" && gh release view "${VERSION}") >/dev/null 2>&1; then
         echo "ERROR: A GitHub release for ${VERSION} already exists. Bump CFBundleShortVersionString first." >&2
         exit 1
@@ -76,6 +81,10 @@ if [ "${RELEASE}" -eq 1 ]; then
         --target "$(git rev-parse HEAD)")
 
     echo "✓ Released: $(cd "${SCRIPT_DIR}" && gh release view "${VERSION}" --json url -q .url)"
+
+    echo "==> Cleaning up build folder..."
+    rm -rf "${BUILD_DIR}"
+    exit 0
 fi
 
 echo ""
