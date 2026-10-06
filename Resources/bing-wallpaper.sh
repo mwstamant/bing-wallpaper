@@ -41,6 +41,9 @@ mkdir -p "${WALLPAPER_DIR}"
 TODAY=$(date +"%Y-%m-%d")
 WALLPAPER_FILE="${WALLPAPER_DIR}/bing-${TODAY}.jpg"
 METADATA_FILE="${WALLPAPER_DIR}/bing-${TODAY}.json"
+# BINGWALLPAPER_APPLY_FILE (set by the app) keeps a manually chosen wallpaper on
+# runs that aren't the timed daily run; today's image is still downloaded.
+APPLY_FILE="${BINGWALLPAPER_APPLY_FILE:-${WALLPAPER_FILE}}"
 
 # Generate timestamped log file (always, so every run is visible in logs)
 TIMESTAMP=$(date +"%m-%d-%Y-%H%M%S")
@@ -129,7 +132,7 @@ PY
         fi
     fi
 
-    osascript -e "tell application \"System Events\" to set picture of every desktop to \"${WALLPAPER_FILE}\"" 2>&1 | tee -a "${LOG_FILE}"
+    osascript -e "tell application \"System Events\" to set picture of every desktop to \"${APPLY_FILE}\"" 2>&1 | tee -a "${LOG_FILE}"
     log_message "=========================================="
     log_message "Bing Daily Wallpaper Update Completed"
     log_message "=========================================="
@@ -229,7 +232,7 @@ fi
 
 # Set wallpaper on all desktops
 log_message "Setting wallpaper on all screens..."
-osascript -e "tell application \"System Events\" to set picture of every desktop to \"${WALLPAPER_FILE}\"" 2>&1 | tee -a "${LOG_FILE}"
+osascript -e "tell application \"System Events\" to set picture of every desktop to \"${APPLY_FILE}\"" 2>&1 | tee -a "${LOG_FILE}"
 
 if [ ${PIPESTATUS[0]} -ne 0 ]; then
     log_message "ERROR: Failed to set wallpaper via System Events"

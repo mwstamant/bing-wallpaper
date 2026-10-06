@@ -22,6 +22,11 @@ enum AppPaths {
         fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first!.appendingPathComponent("BingWallpaper/settings.json").path
     }
+    /// Written by each successful timed run; its mtime (the scheduled time covered) expires older manual picks.
+    static var lastScheduledRunMarker: String {
+        fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first!.appendingPathComponent("BingWallpaper/last-scheduled-run").path
+    }
     static var scriptPath: String {
         Bundle.main.path(forResource: "bing-wallpaper", ofType: "sh")
             ?? (Bundle.main.resourcePath! + "/bing-wallpaper.sh")
@@ -42,7 +47,17 @@ struct Settings: Codable {
     var watermarkSize: String    = "medium"   // small | medium | large | extra-large
     var lastInstalledBuild: String = ""
     var selectedWallpaperFile: String = ""    // filename (not path) of a manually chosen wallpaper; "" = follow today's
+    var selectedWallpaperAt: Double = 0       // when it was chosen; a later scheduled run overrides it
     var autoUpdate: Bool         = true
+
+    /// The most recent scheduled run time at or before `now`.
+    func lastScheduledOccurrence(before now: Date = Date()) -> Date {
+        let cal = Calendar.current
+        guard let today = cal.date(bySettingHour: scheduledHour, minute: scheduledMinute, second: 0, of: now) else {
+            return now
+        }
+        return today <= now ? today : cal.date(byAdding: .day, value: -1, to: today) ?? today
+    }
 
     static func load() -> Settings {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: AppPaths.settingsFile)) else {
@@ -109,6 +124,15 @@ enum ScriptRunner {
         try? fm.createDirectory(atPath: AppPaths.logsDir,          withIntermediateDirectories: true)
         try? fm.createDirectory(atPath: settings.wallpaperDir,      withIntermediateDirectories: true)
 
+        // The LaunchAgent also fires at login (RunAtLoad). A manual pick made after the most
+        // recent scheduled time survives those runs; the timed run (or launchd's catch-up
+        // after sleep) is the first run past a scheduled time and replaces it.
+        let occurrence = settings.lastScheduledOccurrence()
+        let pickedPath = (settings.wallpaperDir as NSString).appendingPathComponent(settings.selectedWallpaperFile)
+        let keepPick   = !settings.selectedWallpaperFile.isEmpty
+            && settings.selectedWallpaperAt > occurrence.timeIntervalSince1970
+            && fm.fileExists(atPath: pickedPath)
+
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/bash")
         task.arguments     = [AppPaths.scriptPath]
@@ -122,9 +146,19 @@ enum ScriptRunner {
             "BINGWALLPAPER_WATERMARK":       settings.enableWatermark ? "1" : "0",
             "BINGWALLPAPER_WATERMARK_SIZE":  settings.watermarkSize,
             "BINGWALLPAPER_LOG_RETENTION":   String(settings.logRetentionDays),
+            "BINGWALLPAPER_APPLY_FILE":      keepPick ? pickedPath : "",
         ]
         do    { try task.run() } catch { exit(1) }
         task.waitUntilExit()
+        if task.terminationStatus == 0 && !keepPick {
+            // Stamped with the scheduled time it covers, so picks made after it stay valid.
+            // Separate file rather than settings.json so the running menu bar app's
+            // in-memory settings can't overwrite it.
+            let dir = (AppPaths.lastScheduledRunMarker as NSString).deletingLastPathComponent
+            try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            fm.createFile(atPath: AppPaths.lastScheduledRunMarker, contents: nil)
+            try? fm.setAttributes([.modificationDate: occurrence], ofItemAtPath: AppPaths.lastScheduledRunMarker)
+        }
         exit(task.terminationStatus)
     }
 }
@@ -1141,8 +1175,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .sorted { $0.date > $1.date }
     }
 
+    private func lastScheduledRunTime() -> Double {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: AppPaths.lastScheduledRunMarker)
+        return (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+    }
+
     private func resolveActiveWallpaperFileName(from wallpapers: [WallpaperEntry]) -> String? {
+        // A manual pick only lasts until the next scheduled run applies today's wallpaper.
         if !settings.selectedWallpaperFile.isEmpty,
+           settings.selectedWallpaperAt > lastScheduledRunTime(),
            wallpapers.contains(where: { $0.fileName == settings.selectedWallpaperFile }) {
             return settings.selectedWallpaperFile
         }
@@ -1179,6 +1220,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard FileManager.default.fileExists(atPath: path) else { return }
         guard applyWallpaperFile(path) else { return }
         settings.selectedWallpaperFile = fileName
+        settings.selectedWallpaperAt = Date().timeIntervalSince1970
         settings.save()
         rebuildMenu()
         refreshWallpaperSwitcher()
@@ -1223,16 +1265,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let today = df.string(from: Date())
         let wallpaperFile = (settings.wallpaperDir as NSString).appendingPathComponent("bing-\(today).jpg")
         guard !FileManager.default.fileExists(atPath: wallpaperFile) else { return }
+
+        // Not a timed run: fetch today's image but keep a still-valid manual pick on screen.
+        let wallpapers = availableWallpapers()
+        let active     = resolveActiveWallpaperFileName(from: wallpapers)
+        let keepPick   = active != nil && active == settings.selectedWallpaperFile
+        let applyFile  = keepPick ? (settings.wallpaperDir as NSString).appendingPathComponent(active!) : nil
+
         isRunning = true
         setIcon(running: true)
         rebuildMenu()
         DispatchQueue.global(qos: .utility).async {
-            ScriptRunner.runInProcess(settings: self.settings, force: false)
+            ScriptRunner.runInProcess(settings: self.settings, force: false, applyFile: applyFile)
             DispatchQueue.main.async {
                 self.isRunning = false
                 self.setIcon(running: false)
-                self.settings.selectedWallpaperFile = ""
-                self.settings.save()
+                if !keepPick {
+                    self.settings.selectedWallpaperFile = ""
+                    self.settings.save()
+                }
                 self.rebuildMenu()
                 self.refreshWallpaperSwitcher()
             }
@@ -1334,7 +1385,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applySettings(_ newSettings: Settings) {
-        settings = newSettings
+        // The Settings window holds a copy taken when it opened; keep state the app
+        // has changed since then instead of reverting it.
+        var merged = newSettings
+        merged.selectedWallpaperFile = settings.selectedWallpaperFile
+        merged.selectedWallpaperAt   = settings.selectedWallpaperAt
+        merged.lastInstalledBuild    = settings.lastInstalledBuild
+        settings = merged
+        settings.save()
         rewriteLaunchAgentSchedule()
         rebuildMenu()
         refreshWallpaperSwitcher()
@@ -1548,7 +1606,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 // MARK: - ScriptRunner (in-process variant for Run Now)
 
 extension ScriptRunner {
-    static func runInProcess(settings: Settings, force: Bool = true) {
+    static func runInProcess(settings: Settings, force: Bool = true, applyFile: String? = nil) {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/bash")
         task.arguments     = [AppPaths.scriptPath]
@@ -1563,6 +1621,7 @@ extension ScriptRunner {
             "BINGWALLPAPER_WATERMARK_SIZE":  settings.watermarkSize,
             "BINGWALLPAPER_LOG_RETENTION":   String(settings.logRetentionDays),
             "BINGWALLPAPER_FORCE":           force ? "1" : "0",
+            "BINGWALLPAPER_APPLY_FILE":      applyFile ?? "",
         ]
         try? task.run()
         task.waitUntilExit()
