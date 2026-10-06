@@ -42,10 +42,24 @@ struct Settings: Codable {
     var watermarkSize: String    = "medium"   // small | medium | large | extra-large
     var lastInstalledBuild: String = ""
     var selectedWallpaperFile: String = ""    // filename (not path) of a manually chosen wallpaper; "" = follow today's
+    var autoUpdate: Bool         = true
 
     static func load() -> Settings {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: AppPaths.settingsFile)),
-              let s    = try? JSONDecoder().decode(Settings.self, from: data) else {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: AppPaths.settingsFile)) else {
+            return Settings()
+        }
+        if let s = try? JSONDecoder().decode(Settings.self, from: data) { return s }
+
+        // Settings written by an older version lack newer keys, which fails synthesized
+        // decoding — fill the missing keys from defaults instead of discarding everything.
+        guard let saved        = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let defaultsData = try? JSONEncoder().encode(Settings()),
+              var merged       = try? JSONSerialization.jsonObject(with: defaultsData) as? [String: Any] else {
+            return Settings()
+        }
+        merged.merge(saved) { _, savedValue in savedValue }
+        guard let mergedData = try? JSONSerialization.data(withJSONObject: merged),
+              let s          = try? JSONDecoder().decode(Settings.self, from: mergedData) else {
             return Settings()
         }
         return s
@@ -115,6 +129,136 @@ enum ScriptRunner {
     }
 }
 
+// MARK: - Updater
+
+enum Updater {
+    static let latestReleaseURL = URL(string: "https://api.github.com/repos/mwstamant/bing-wallpaper/releases/latest")!
+
+    struct Release: Decodable {
+        struct Asset: Decodable {
+            let name: String
+            let browser_download_url: URL
+        }
+        let tag_name: String
+        let assets: [Asset]
+
+        var version: String { tag_name.hasPrefix("v") ? String(tag_name.dropFirst()) : tag_name }
+        var zipAsset: Asset? { assets.first { $0.name.hasPrefix("BingWallpaper") && $0.name.hasSuffix(".zip") } }
+    }
+
+    enum UpdateError: LocalizedError {
+        case noAsset
+        case notWritable(String)
+        case extractFailed
+        case invalidBundle(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .noAsset:              return "The release has no BingWallpaper .zip attached."
+            case .notWritable(let dir): return "No permission to replace the app in \(dir)."
+            case .extractFailed:        return "Could not extract the downloaded update."
+            case .invalidBundle(let r): return "The downloaded app failed verification: \(r)."
+            }
+        }
+    }
+
+    static var currentVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+    }
+
+    static func isNewer(_ candidate: String, than current: String) -> Bool {
+        let a = candidate.split(separator: ".").map { Int($0) ?? 0 }
+        let b = current.split(separator: ".").map { Int($0) ?? 0 }
+        for i in 0..<max(a.count, b.count) {
+            let x = i < a.count ? a[i] : 0
+            let y = i < b.count ? b[i] : 0
+            if x != y { return x > y }
+        }
+        return false
+    }
+
+    /// The latest GitHub release if it is newer than the running app, otherwise nil.
+    static func fetchNewerRelease() async throws -> Release? {
+        var request = URLRequest(url: latestReleaseURL)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("BingWallpaper/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
+        let release = try JSONDecoder().decode(Release.self, from: data)
+        return isNewer(release.version, than: currentVersion) ? release : nil
+    }
+
+    /// Downloads and verifies the release, then starts a detached helper that swaps the
+    /// bundle once this process exits and relaunches it. The caller must quit the app afterwards.
+    static func prepareInstall(_ release: Release) async throws {
+        guard let asset = release.zipAsset else { throw UpdateError.noAsset }
+        let fm        = FileManager.default
+        let targetApp = Bundle.main.bundleURL
+        let parentDir = targetApp.deletingLastPathComponent().path
+        guard fm.isWritableFile(atPath: parentDir) else { throw UpdateError.notWritable(parentDir) }
+
+        let workDir = fm.temporaryDirectory.appendingPathComponent("BingWallpaperUpdate-\(UUID().uuidString)")
+        try fm.createDirectory(at: workDir, withIntermediateDirectories: true)
+
+        let (downloaded, _) = try await URLSession.shared.download(from: asset.browser_download_url)
+        let zipURL = workDir.appendingPathComponent(asset.name)
+        try fm.moveItem(at: downloaded, to: zipURL)
+
+        guard run("/usr/bin/ditto", ["-x", "-k", zipURL.path, workDir.path]) == 0,
+              let newApp = try fm.contentsOfDirectory(at: workDir, includingPropertiesForKeys: nil)
+                  .first(where: { $0.pathExtension == "app" }) else {
+            throw UpdateError.extractFailed
+        }
+
+        let info = Bundle(url: newApp)?.infoDictionary
+        guard info?["CFBundleIdentifier"] as? String == Bundle.main.bundleIdentifier else {
+            throw UpdateError.invalidBundle("bundle identifier mismatch")
+        }
+        guard info?["CFBundleShortVersionString"] as? String == release.version else {
+            throw UpdateError.invalidBundle("version does not match release \(release.version)")
+        }
+        guard run("/usr/bin/codesign", ["--verify", "--deep", "--strict", newApp.path]) == 0 else {
+            throw UpdateError.invalidBundle("code signature is invalid")
+        }
+
+        // Swap via a staged copy next to the target so a failure leaves the old app in place.
+        let script = """
+        #!/bin/bash
+        PID="$1"; NEW="$2"; TARGET="$3"; WORK="$4"
+        while kill -0 "$PID" 2>/dev/null; do sleep 0.5; done
+        STAGE="${TARGET}.new"; BACKUP="${TARGET}.old"
+        rm -rf "$STAGE" "$BACKUP"
+        if ditto "$NEW" "$STAGE" && mv "$TARGET" "$BACKUP"; then
+            if mv "$STAGE" "$TARGET"; then rm -rf "$BACKUP"; else mv "$BACKUP" "$TARGET"; fi
+        fi
+        rm -rf "$STAGE"
+        xattr -dr com.apple.quarantine "$TARGET" 2>/dev/null
+        open "$TARGET"
+        rm -rf "$WORK"
+        """
+        let scriptURL = workDir.appendingPathComponent("install-update.sh")
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+
+        let helper = Process()
+        helper.executableURL = URL(fileURLWithPath: "/bin/bash")
+        helper.arguments = [scriptURL.path, String(ProcessInfo.processInfo.processIdentifier),
+                            newApp.path, targetApp.path, workDir.path]
+        try helper.run()
+    }
+
+    @discardableResult
+    private static func run(_ executable: String, _ args: [String]) -> Int32 {
+        let task = Process()
+        task.executableURL  = URL(fileURLWithPath: executable)
+        task.arguments      = args
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError  = FileHandle.nullDevice
+        do { try task.run() } catch { return -1 }
+        task.waitUntilExit()
+        return task.terminationStatus
+    }
+}
+
 // MARK: - Settings Window
 
 @MainActor
@@ -129,8 +273,10 @@ final class SettingsEditorModel: ObservableObject {
     @Published var watermarkSize: String
     @Published var logRetentionDays: Int
     @Published var wallpaperDir: String
+    @Published var autoUpdate: Bool
 
     let logsPath: String
+    let currentVersion = Updater.currentVersion
 
     let markets = ["en-US", "en-GB", "en-AU", "de-DE", "fr-FR", "ja-JP", "zh-CN", "pt-BR"]
     let resolutions = ["UHD", "1920x1080", "1366x768", "1280x720"]
@@ -141,6 +287,7 @@ final class SettingsEditorModel: ObservableObject {
     private let runNow: () -> Void
     private let setRunAtLogin: (Bool) -> Bool
     private let setDailyScheduleEnabled: (Bool) -> Bool
+    private let checkForUpdatesAction: () -> Void
 
     init(settings: Settings,
          runAtLogin: Bool,
@@ -149,7 +296,8 @@ final class SettingsEditorModel: ObservableObject {
          applySettings: @escaping (Settings) -> Void,
          runNow: @escaping () -> Void,
          setRunAtLogin: @escaping (Bool) -> Bool,
-         setDailyScheduleEnabled: @escaping (Bool) -> Bool) {
+         setDailyScheduleEnabled: @escaping (Bool) -> Bool,
+         checkForUpdates: @escaping () -> Void) {
         self.settings = settings
         self.runAtLogin = runAtLogin
         self.dailyScheduleEnabled = dailyScheduleEnabled
@@ -161,11 +309,17 @@ final class SettingsEditorModel: ObservableObject {
         self.watermarkSize = settings.watermarkSize
         self.logRetentionDays = settings.logRetentionDays
         self.wallpaperDir = settings.wallpaperDir
+        self.autoUpdate = settings.autoUpdate
         self.logsPath = logsPath
         self.applySettings = applySettings
         self.runNow = runNow
         self.setRunAtLogin = setRunAtLogin
         self.setDailyScheduleEnabled = setDailyScheduleEnabled
+        self.checkForUpdatesAction = checkForUpdates
+    }
+
+    func checkForUpdates() {
+        checkForUpdatesAction()
     }
 
     func updateRunAtLogin() {
@@ -197,6 +351,7 @@ final class SettingsEditorModel: ObservableObject {
         settings.watermarkSize = watermarkSizes.contains(watermarkSize) ? watermarkSize : "medium"
         settings.logRetentionDays = max(logRetentionDays, 1)
         settings.wallpaperDir = wallpaperDir.trimmingCharacters(in: .whitespacesAndNewlines)
+        settings.autoUpdate = autoUpdate
 
         scheduledHour = settings.scheduledHour
         scheduledMinute = settings.scheduledMinute
@@ -388,10 +543,28 @@ struct SettingsWindowView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
+
+            SectionCard(title: "Updates", icon: "arrow.down.circle") {
+                Toggle("Automatically install updates", isOn: Binding(
+                    get: { model.autoUpdate },
+                    set: { model.autoUpdate = $0; model.applyChanges(triggerRunNow: false) }
+                ))
+                .toggleStyle(.switch)
+
+                HStack(spacing: 8) {
+                    Text("Current version \(model.currentVersion)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Check Now") {
+                        model.checkForUpdates()
+                    }
+                }
+            }
         }
         .padding(18)
         .background(Color(NSColor.windowBackgroundColor))
-        .frame(minWidth: 620, minHeight: 640)
+        .frame(minWidth: 620, minHeight: 760)
     }
 }
 
@@ -434,7 +607,7 @@ class SettingsWindowController: NSWindowController, NSWindowDelegate {
         self.settings = settings
         self.appDelegate = delegate
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 640, height: 680),
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 800),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -471,6 +644,9 @@ class SettingsWindowController: NSWindowController, NSWindowDelegate {
             setDailyScheduleEnabled: { [weak appDelegate] enabled in
                 appDelegate?.setDailyScheduleEnabled(enabled)
                 return appDelegate?.isDailyScheduleEnabled() ?? false
+            },
+            checkForUpdates: { [weak appDelegate] in
+                appDelegate?.checkForUpdates(userInitiated: true)
             }
         )
         self.editorModel = model
@@ -763,6 +939,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var isRunning = false
     private var settings  = Settings.load()
     private var screenChangeWorkItem: DispatchWorkItem?
+    private var updateTimer: Timer?
+    private var isUpdating = false
 
     private let launchAgentLabel = "com.nnet.bing-wallpaper"
 
@@ -796,6 +974,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSWorkspace.screensDidWakeNotification,
             object: nil
         )
+        scheduleUpdateChecks()
     }
 
     // MARK: Status Item
@@ -836,6 +1015,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(mi("Settings…", sel: #selector(openSettings), key: ","))
         menu.addItem(mi("About Bing Wallpaper", sel: #selector(openAbout)))
+        menu.addItem(mi(isUpdating ? "Updating…" : "Check for Updates…",
+                        sel: isUpdating ? nil : #selector(checkForUpdatesFromMenu)))
         menu.addItem(.separator())
         menu.addItem(mi("Quit", sel: #selector(quit), key: "q"))
 
@@ -1169,6 +1350,95 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             // Checkbox corrects itself by re-reading SMAppService.mainApp.status
         }
+    }
+
+    // MARK: Updates
+
+    private func scheduleUpdateChecks() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
+            self?.checkForUpdates(userInitiated: false)
+        }
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 24 * 60 * 60, repeats: true) { [weak self] _ in
+            self?.checkForUpdates(userInitiated: false)
+        }
+    }
+
+    @objc private func checkForUpdatesFromMenu() {
+        checkForUpdates(userInitiated: true)
+    }
+
+    func checkForUpdates(userInitiated: Bool) {
+        guard !isUpdating, userInitiated || settings.autoUpdate else { return }
+        isUpdating = true
+        rebuildMenu()
+        Task {
+            do {
+                let release = try await Updater.fetchNewerRelease()
+                await MainActor.run { self.handleUpdateCheck(release, userInitiated: userInitiated) }
+            } catch {
+                await MainActor.run {
+                    self.finishUpdate(failure: userInitiated ? ("Couldn't check for updates", error) : nil)
+                }
+            }
+        }
+    }
+
+    private func handleUpdateCheck(_ release: Updater.Release?, userInitiated: Bool) {
+        guard let release else {
+            finishUpdate()
+            if userInitiated {
+                showAlert(title: "You're up to date",
+                          message: "Bing Wallpaper \(Updater.currentVersion) is the latest version.")
+            }
+            return
+        }
+
+        if userInitiated {
+            let alert = NSAlert()
+            alert.messageText     = "Bing Wallpaper \(release.version) is available"
+            alert.informativeText = "You have version \(Updater.currentVersion). The app will relaunch after updating."
+            alert.addButton(withTitle: "Install and Relaunch")
+            alert.addButton(withTitle: "Later")
+            NSApp.activate(ignoringOtherApps: true)
+            guard alert.runModal() == .alertFirstButtonReturn else { finishUpdate(); return }
+        }
+
+        // Don't kill an in-flight wallpaper run; the next check will pick the update up.
+        guard !isRunning else {
+            finishUpdate()
+            if userInitiated {
+                showAlert(title: "Update postponed",
+                          message: "A wallpaper update is in progress. Try again once it finishes.")
+            }
+            return
+        }
+
+        Task {
+            do {
+                try await Updater.prepareInstall(release)
+                await MainActor.run { NSApp.terminate(nil) }
+            } catch {
+                await MainActor.run {
+                    self.finishUpdate(failure: userInitiated ? ("Update failed", error) : nil)
+                }
+            }
+        }
+    }
+
+    private func finishUpdate(failure: (title: String, error: Error)? = nil) {
+        isUpdating = false
+        rebuildMenu()
+        if let failure {
+            showAlert(title: failure.title, message: failure.error.localizedDescription)
+        }
+    }
+
+    private func showAlert(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText     = title
+        alert.informativeText = message
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 
     // MARK: Directories

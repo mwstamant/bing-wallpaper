@@ -14,6 +14,7 @@ Bing Wallpaper runs silently in the macOS menu bar and keeps your desktop fresh 
 - **Multi-screen** — sets the wallpaper on every connected desktop/display
 - **Settings window** — configure schedule time, market/language, resolution, wallpaper folder, and log retention
 - **Log viewer** — open the latest run log directly from the menu
+- **Auto-update** — checks GitHub Releases daily and installs newer versions, relaunching the app (or use *Check for Updates…* in the menu)
 
 The app wraps a bash script (`bing-wallpaper.sh`) that fetches the Bing image API, downloads the wallpaper at the requested resolution, optionally applies a watermark using a bundled Swift helper, and applies the image via `osascript`/System Events.
 
@@ -32,6 +33,7 @@ All settings are persisted to `~/Library/Application Support/BingWallpaper/setti
 | `wallpaperDir`      | Folder where wallpaper images are saved            | `~/Pictures/BingWallpaper`     |
 | `logRetentionDays`  | Number of days to keep log files                   | `7`                            |
 | `enableWatermark`   | Stamp image title and description on the wallpaper | `true`                         |
+| `autoUpdate`        | Automatically install new GitHub releases          | `true`                         |
 
 ### :dvd: Configuration Details
 
