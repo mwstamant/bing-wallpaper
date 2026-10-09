@@ -233,6 +233,8 @@ fi
 
 # Set wallpaper on all desktops
 log_message "Setting wallpaper on all screens..."
+WALLPAPER_STORE="${HOME}/Library/Application Support/com.apple.wallpaper/Store/Index.plist"
+SET_STARTED=$(date +%s)
 osascript -e "tell application \"System Events\" to set picture of every desktop to \"${APPLY_FILE}\"" 2>&1 | tee -a "${LOG_FILE}"
 
 if [ ${PIPESTATUS[0]} -ne 0 ]; then
@@ -241,10 +243,24 @@ if [ ${PIPESTATUS[0]} -ne 0 ]; then
     exit 1
 fi
 
-# Force WallpaperAgent to re-read from disk (handles same-path cache)
-# Sleep briefly so osascript can finish writing the preference before the agent restarts
-sleep 2
-killall WallpaperAgent 2>/dev/null || true
+# Force WallpaperAgent to re-read from disk (handles same-path cache).
+# Only restart it once it has persisted the new choice to its store — killing it
+# earlier silently reverts every desktop to the previously saved wallpaper.
+STORE_SAVED=0
+for _ in $(seq 1 30); do
+    if [ "$(stat -f %m "${WALLPAPER_STORE}" 2>/dev/null || echo 0)" -ge "${SET_STARTED}" ]; then
+        STORE_SAVED=1
+        break
+    fi
+    sleep 0.5
+done
+
+if [ "${STORE_SAVED}" = "1" ]; then
+    sleep 1
+    killall WallpaperAgent 2>/dev/null || true
+else
+    log_message "WARNING: WallpaperAgent hasn't saved the change after 15s — skipping restart"
+fi
 
 log_message "Wallpaper set successfully on all screens"
 
