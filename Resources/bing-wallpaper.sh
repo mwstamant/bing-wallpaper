@@ -68,7 +68,8 @@ fetch_bing_metadata() {
             return 0
         fi
         if [ "${attempt}" -lt "${RETRY_ATTEMPTS}" ]; then
-            log_message "Bing API fetch attempt ${attempt} failed — retrying in ${RETRY_DELAY}s..."
+            # stderr: this function's stdout is captured as the API response.
+            log_message "Bing API fetch attempt ${attempt} failed — retrying in ${RETRY_DELAY}s..." >&2
             sleep "${RETRY_DELAY}"
         fi
     done
